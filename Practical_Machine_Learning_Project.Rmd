@@ -1,0 +1,160 @@
+---
+title: "Practical Machine Learning - Project"
+author: "Thierry Martens"
+output: html_document
+---
+
+###1. Introduction  
+  
+Human Activity Recognition (HAR) research has gained a lot of interest in recent years. 
+The goal of this project is to use Machine Learning to help determine __*how (well)*__ an activity was performed by the wearer of sensors. The activity studied is "Weight Lifting Exercises".
+  
+Six young healthy participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions [1]: 
+  
+  - CLASS A: exactly according to the specification
+  - CLASS B: throwing the elbows to the front
+  - CLASS C: lifting the dumbbell only halfway
+  - CLASS D: lowering the dumbbell only halfway
+  - CLASS E: throwing the hips to the front
+  
+  
+###2. Exploratory Data Analysis  
+  
+The training data for this project are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv); the test data are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).  
+The training data is further split in a training and a (cross-)validation set. So, there are 3 sets of data: training, (cross-)validation, and test.  
+For the use of these three sets, the interested reader can be referred to [this lecture](https://class.coursera.org/ml-005/lecture/61).   
+  
+```{r readData, echo = FALSE, message=FALSE,warning=FALSE}
+#read data
+train<-read.csv("./_08 Practical Machine Learning/pml-training.csv", na.strings = c("NA",""," "))
+test<-read.csv("./_08 Practical Machine Learning/pml-testing.csv")
+train_data<-train[train$new_window=="no",8:dim(train)[2]]
+require(caret)
+XVal_Index <- createDataPartition(train_data$classe, p = 0.80,list=FALSE)
+training <- train_data[XVal_Index,]
+validation <- train_data[-XVal_Index,]
+```
+  
+  
+####2.a. First findings  
+Thirty-eight variables each from 4 sensors (in user's glove (forearm), armband, lumbar belt, and dumbbell) are measured.  
+Together with 7 *descriptive* variables (like username, some timestamps, ...), and the outcome (the class; see list above), this amounts to 160 variables.  
+($38*4 + 7 + 1 = 160$)  
+
+Looking closely at the data reveals that summary variables (min, max, kurtosis, skewness, ...) only have meaningful values when the variable *new_window=yes*.  
+All these summary rows have been left out (406 in total).
+
+Also, the 7 descriptive columns/predictors have been excluded from the analysis; neither the name of the participant, nor the time an exercise was performed should be considered when determining if an excercise is done properly. Any kind of relationship between the outcome and these variables would be spurious! 
+  
+  
+####2.b. Removing Zero Variance Variables  
+  
+```{r removeNZV, echo=FALSE, message=FALSE, warning=FALSE}
+require(caret)
+x<-nearZeroVar(training, saveMetrics = TRUE)
+covnames<-row.names(x[x[,"zeroVar"] == 0, ])
+```
+The first step in the feature selection involves removing all (near) Zero Variance variables, using the nearZeroVar function in the caret package.  
+After this step, `r length(covnames)-1` predictors + outcome (Classe) remain.
+  
+```{r removeHighCorr, message=FALSE, echo=FALSE, warning=FALSE}
+require(Hmisc)
+require(corrplot) 
+
+preTraining<-preProcess(training[,covnames[covnames != "classe"]],method=c("center","scale"))
+train_2<-predict(preTraining,training[,covnames[covnames != "classe"]])
+corMatTrain <- cor(train_2) #compute the correlation matrix
+highlyCor <- findCorrelation(corMatTrain, 0.70) #Apply correlation filter at 0.70,
+train_2_filtered <- train_2[,-highlyCor] #then we remove all the variable correlated with more 0.7.
+corMatTrain <- cor(train_2_filtered)
+corrplot(corMatTrain, order = "hclust",tl.cex=.6)
+covnames_2<-colnames(train_2_filtered)
+#32 predictors remain....
+```
+  
+In the next step, highly correlated (so-called collinear) variables are deselected. 
+The remaining `r length(covnames_2)` predictors are shown in their correlation matrix here (see above).
+  
+  
+###3. Building a Model  
+  
+Three different models are built:
+  
+1. Random Forest
+2. Boosted Gradient (with Trees)
+3. Linear Discriminant Analysis
+  
+The train function in the caret package is used to fit these models on the training data.  
+Using this function with default parameters, cross-validation is done through simple bootstrap resampling (more info can be found [here](http://topepo.github.io/caret/training.html)).  
+
+```{r ModelRF, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE}
+form <- as.formula(paste("classe~", paste(covnames_2, collapse="+"), sep=""))
+
+modelRF<-train(form,data=training,method="rf") #takes one hour!
+#results<-varImp(modelRF$finalModel)
+#results[order(-results$Overall),,drop=F]
+```
+
+```{r ModelBT, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE}
+modelBT<-train(form,data=training,method="gbm",verbose=F) #takes 30'
+#results_2<-varImp(modelBT$finalModel)
+#results_2[order(-results_2$Overall),,drop=F]
+```
+
+```{r ModelLDA, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE}
+modelLDA<-train(form,data=training,method="lda",verbose=F) #instantenous
+```
+
+  
+###4. Testing the model / Out of sample Accuracy
+
+```{r CrossValidation, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE}
+predRF<-predict(modelRF,newdata=validation)
+c.matrixRF <- confusionMatrix(predRF,validation$classe)
+
+predBT<-predict(modelBT,newdata=validation)
+c.matrixBT <- confusionMatrix(predBT,validation$classe)
+
+predLDA<-predict(modelBT,newdata=validation)
+c.matrixLDA <- confusionMatrix(predLDA,validation$classe)
+```
+
+Testing the results from the different algorithms with the data from the validation set, the following results (from the confusion matrixes) for the accuracy are obtained:  
+
+```{r AccuracyResults, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+require(knitr)
+result_table<-rbind(c.matrixRF$overall[1], c.matrixBT$overall[1],c.matrixLDA$overall[1])
+result_table<-matrix(as.numeric(unlist(result_table)),nrow=nrow(result_table))
+rownames(result_table)<-c("Random Forest","Boosted Gradient","Linear Discriminant")
+colnames(result_table)<- "Accuracy"
+kable(result_table, digits=2, row.names=T) 
+```
+
+  
+    
+And the 95% confidence intervals for the expected (out of sample) accuracy are resp. :  
+
+```{r ConfIntResults, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+require(knitr)
+result_table_2<-rbind(c(c.matrixRF$overall[3], c.matrixRF$overall[4]), c(c.matrixBT$overall[3],c.matrixBT$overall[4]),c(c.matrixLDA$overall[3],c.matrixLDA$overall[4]))
+result_table_2<-matrix(as.numeric(unlist(result_table_2)),nrow=nrow(result_table_2))
+rownames(result_table_2)<-c("Random Forest","Boosted Gradient","Linear Discriminant")
+colnames(result_table_2)<- c("Lower Bound CI", "Upper Bound CI")
+kable(result_table_2, digits=2, row.names=T) 
+```
+
+  
+Clearly, the results of the Random Forest model are much better than the other models.  
+The Random Forest model will hence also be applied to the 20 test cases available in the test data.
+  
+
+```{r Submission, echo=FALSE, message=FALSE, warning=FALSE}  
+predSubmission<-predict(modelRF,newdata=test) 
+#predSubmission
+```  
+  
+  
+  
+#####References  
+[1] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf). Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
